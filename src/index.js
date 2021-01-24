@@ -1,88 +1,86 @@
-type Pure = { value: any; type: "Pure" };
-type Chain = { chainer: (val: any) => Effect; after: Effect; type: "Chain" };
-type Perform = {
-  key: PropertyKey;
-  args: any[];
-  options?: { scope: ResumeContext };
-  type: "Perform";
+const c = function (chainer) {
+  return new Chain(chainer, this);
 };
-type Handler = {
-  handlers: Handlers;
-  program: Effect;
-  type: "Handler";
+const m = function (mapper) {
+  return new Chain((e) => pure(mapper(e)), this);
 };
-type ResumeContext = {
-  transformCtx: Context;
-  programCtx: Context;
-};
-type Resume = {
-  cont: ResumeContext;
-  value: any;
-  type: "Resume";
-};
-type SingleCallback = {
-  type: "SingleCallback";
-  callback: (done: (value: any) => void) => void;
-};
-type Effect<T = any> =
-  | Pure
-  | Chain
-  | Perform
-  | Handler
-  | Resume
-  | SingleCallback;
-type Context = { action: Effect<any>; prev?: Context; transformCtx?: Context };
-const pure = <T>(value: T) => ({ value, type: "Pure" } as Effect);
+class Of {
+  constructor(value) {
+    this.value = value;
+  }
+}
+Of.prototype.chain = c;
+Of.prototype.map = m;
+class Chain {
+  constructor(chainer, after) {
+    this.chainer = chainer;
+    this.after = after;
+  }
+}
+Chain.prototype.chain = c;
+Chain.prototype.map = m;
+class Perform {
+  constructor(key, args, options) {
+    this.key = key;
+    this.args = args;
+    this.options = options;
+  }
+}
+Perform.prototype.chain = c;
+Perform.prototype.map = m;
+class Handler {
+  constructor(handlers, program) {
+    this.handlers = handlers;
+    this.program = program;
+  }
+}
+Handler.prototype.chain = c;
+Handler.prototype.map = m;
+class Resume {
+  constructor(cont, value) {
+    this.cont = cont;
+    this.value = value;
+  }
+}
+Resume.prototype.chain = c;
+Resume.prototype.map = m;
+class SingleCallback {
+  constructor(callback) {
+    this.callback = callback;
+  }
+}
+SingleCallback.prototype.chain = c;
+SingleCallback.prototype.map = m;
 
-const chain = <T, T2>(chainer: (val: T) => Effect<T2>) => (action: Effect<T>) =>
-  ({ chainer, after: action, type: "Chain" } as Effect);
+const pure = (value) => new Of(value);
 
-const map = <T, T2>(mapper: (val: T) => T2) => (action: Effect<T>) =>
-  chain((e: T) => pure(mapper(e)))(action) as Effect;
+const chain = (chainer) => (action) => new Chain(chainer, action);
 
-const _effect = <K extends PropertyKey, Args extends any[]>(key: K) => (
-  ...args: Args
-) => ({ key, args, options: undefined, type: "Perform" } as Perform);
+const map = (mapper) => (action) =>
+  new Chain((val) => pure(mapper(val)), action);
 
-const options = (options: { scope: ResumeContext }) => (perform: Perform) => (
+const _effect = (key) => (...args) => new Perform(key, args);
+
+const options = (options) => (perform) => (
   (perform.options = options), perform
 );
 
-const _perform = <K extends PropertyKey, Args extends any[]>(
-  key: K,
-  ...args: Args
-) => ({ key, args, options: undefined, type: "Perform" } as Perform);
-type Handlers = Record<PropertyKey, any>;
-const _handler = (handlers: Handlers) => (program: Effect<any>) =>
-  ({
-    handlers,
-    program,
-    type: "Handler",
-  } as Effect);
+const _perform = (key, ...args) => new Perform(key, args);
 
-const _resume = (continuation: ResumeContext, value: any) =>
-  ({
-    cont: continuation,
-    value,
-    type: "Resume",
-  } as Effect);
+const _handler = (handlers) => (program) => new Handler(handlers, program);
 
-const singleCallback = <T>(callback: (done: (value: T) => void) => void) =>
-  ({
-    callback,
-    type: "SingleCallback",
-  } as Effect);
+const _resume = (continuation, value) => new Resume(continuation, value);
 
-const findHandlers = (key: PropertyKey) => (context: Context) => (
-  onError: (error: any) => void
-) => {
-  let curr = context as Context | undefined;
+const _singleCallback = (callback) => new SingleCallback(callback);
+
+const findHandlers = (key) => (context) => (onError) => {
+  let curr = context;
   while (curr) {
     const action = curr.action;
-    if (action.type === "Handler") {
-      const handler = action.handlers[key as string];
+    if (curr.action.constructor === Handler) {
+      const handler = action.handlers[key];
       if (handler) {
-        return [handler, curr.transformCtx] as const;
+        return [handler, curr.transformCtx];
       }
     }
     curr = curr.prev;
@@ -91,19 +89,20 @@ const findHandlers = (key: PropertyKey) => (context: Context) => (
 };
 
 class Interpreter {
-  constructor(
-    private onDone: (value: any) => void,
-    private onError: (value: any) => void,
-    private context: Context | undefined,
-    private isPaused = true
-  ) {}
+  constructor(onDone, onError, context) {
+    this.context = context;
+    this.onError = onError;
+    this.onDone = onDone;
+    this.isPaused = true;
+  }
   run() {
     this.isPaused = false;
     while (this.context) {
       const action = this.context.action;
       const context = this.context;
-      switch (action.type) {
-        case "Chain": {
+      // console.log(context, context.action);
+      switch (action.constructor) {
+        case Chain: {
           // const nested = action.after;
           // switch (nested.type) {
           //   case "of": {
@@ -118,15 +117,15 @@ class Interpreter {
           //   default: {}}
           this.context = {
             prev: context,
-            action: action.after,
+            action: action.after
           };
           break;
         }
-        case "Pure": {
+        case Of: {
           this.return(action.value, context);
           break;
         }
-        case "SingleCallback": {
+        case SingleCallback: {
           this.context = undefined;
           action.callback((value) => {
             this.return(value, context);
@@ -136,19 +135,24 @@ class Interpreter {
           });
           break;
         }
-        case "Handler": {
+        case Handler: {
           const { handlers, program } = action;
           const transformCtx = {
             prev: context,
-            action: handlers.return
-              ? chain(handlers.return)(program)
-              : chain(pure)(program),
+            action: program
           };
-          context.transformCtx = transformCtx;
+          const lastPrev = context.prev;
+          context.prev = {
+            prev: lastPrev,
+            action: handlers.return
+              ? program.chain(handlers.return)
+              : program.chain(pure)
+          };
+          context.transformCtx = context.prev;
           this.context = transformCtx;
           break;
         }
-        case "Perform": {
+        case Perform: {
           const { args, options } = action;
           const h = findHandlers(action.key)(
             options && options.scope ? options.scope.programCtx : context
@@ -157,18 +161,18 @@ class Interpreter {
           const [handler, transformCtx] = h;
           const handlerAction = handler(...args, {
             transformCtx,
-            programCtx: context,
+            programCtx: context
           });
           const activatedHandlerCtx = {
             // 1. Make the activated handler returns to the *return transformation* parent,
             // and not to the *return transformation* directly (so it doesn't get transformed)
-            prev: transformCtx!.prev,
-            action: handlerAction,
+            prev: transformCtx.prev,
+            action: handlerAction
           };
           this.context = activatedHandlerCtx;
           break;
         }
-        case "Resume": {
+        case Resume: {
           // inside activatedHandlerCtx
           const { value, cont } = action;
           // context of the transformer, context of the program to continue
@@ -194,18 +198,18 @@ class Interpreter {
     }
     this.isPaused = true;
   }
-  return(value: any, currCtx: Context) {
+  return(value, currCtx) {
     const prev = currCtx && currCtx.prev;
     if (prev) {
-      switch (prev.action.type) {
-        case "Handler": {
+      switch (prev.action.constructor) {
+        case Handler: {
           this.return(value, prev);
           break;
         }
-        case "Chain": {
+        case Chain: {
           this.context = {
             prev: prev.prev,
-            action: prev.action.chainer(value),
+            action: prev.action.chainer(value)
           };
           break;
         }
@@ -219,82 +223,74 @@ class Interpreter {
     }
   }
 }
-// const _io = _effect("io");
-// const withIo = _handler({
-//   return: (value) => pure(() => value),
-//   io: (thunk, k) => _resume(k, thunk()),
-// });
+const _io = effect("io");
+const _withIo = handler({
+  return: (value) => pure(() => value),
+  io: (thunk, k) => resume(k, thunk())
+});
 
-// const Effect = {
-//   map,
-//   chain,
-//   of: pure,
-//   single: makeGeneratorDo(pure)(chain),
-//   do: makeMultishotGeneratorDo(pure)(chain),
-// };
-// const eff = Effect.single;
-// const _forEach = _effect("forEach");
+const _forEach = effect("forEach");
 
-// const _withForEach = _handler({
-//   return: (val) => pure([val]),
-//   forEach: (array, k) => {
-//     const nextInstr = (newArr = []) => {
-//       if (array.length === 0) {
-//         return pure(newArr);
-//       } else {
-//         const first = array.shift();
-//         return _resume(k, first).chain((a) => {
-//           for (const item of a) {
-//             newArr.push(item);
-//           }
-//           return nextInstr(newArr);
-//         });
-//       }
-//     };
-//     return nextInstr();
-//   },
-// });
+const _withForEach = handler({
+  return: (val) => pure([val]),
+  forEach: (array, k) => {
+    const nextInstr = (newArr = []) => {
+      if (array.length === 0) {
+        return pure(newArr);
+      } else {
+        const first = array.shift();
+        return resume(k, first).chain((a) => {
+          for (const item of a) {
+            newArr.push(item);
+          }
+          return nextInstr(newArr);
+        });
+      }
+    };
+    return nextInstr();
+  }
+});
 
-// const _raise = _effect("error");
-// const handleError = (handleError) =>
-//   _handler({
-//     error: (exn, k) => handleError(k, exn),
-//   });
-// const toEither = _handler({
-//   return: (value) =>
-//     pure({
-//       type: "right",
-//       value,
-//     }),
-//   error: (exn) =>
-//     pure({
-//       type: "left",
-//       value: exn,
-//     }),
-// });
-// const _waitFor = _effect("async");
+const _raise = effect("error");
+const _handleError = (handleError) =>
+  handler({
+    error: (exn, k) => handleError(k, exn)
+  });
+const _toEither = handler({
+  return: (value) =>
+    pure({
+      type: "right",
+      value
+    }),
+  error: (exn) =>
+    pure({
+      type: "left",
+      value: exn
+    })
+});
+const _waitFor = effect("async");
 
-// const withIoPromise = _handler({
-//   return: (value) => pure(Promise.resolve(value)),
-//   async: (iopromise, k) =>
-//     _io(iopromise).chain((promise) =>
-//       singleCallback((done) => {
-//         promise
-//           .then((value) => {
-//             done({ success: true, value });
-//           })
-//           .catch((error) => {
-//             done({ success: false, error });
-//           });
-//       }).chain((res) =>
-//         res.success
-//           ? _resume(k, res.value)
-//           : options({
-//               scope: k,
-//             })(_raise(res.value)).chain((e) => _resume(k, e))
-//       )
-//     ),
-// });
+const _withIoPromise = handler({
+  return: (value) => pure(Promise.resolve(value)),
+  async: (iopromise, k) =>
+    io(iopromise).chain((promise) =>
+      singleCallback((done) => {
+        promise
+          .then((value) => {
+            done({ success: true, value });
+          })
+          .catch((error) => {
+            done({ success: false, error });
+          });
+      }).chain((res) =>
+        res.success
+          ? resume(k, res.value)
+          : options({
+              scope: k
+            })(raise(res.value)).chain((e) => resume(k, e))
+      )
+    )
+});
 const _run = (program) =>
   new Promise((resolve, reject) => {
     new Interpreter(
@@ -309,10 +305,11 @@ const _run = (program) =>
       reject,
       {
         prev: undefined,
-        action: toEither(withIoPromise(withIo(program))),
+        action: withIo(toEither(withIoPromise(program)))
       }
     ).run();
   });
+
 /** effectful expression throws this object if it requires suspension */
 const token = {};
 
@@ -337,20 +334,19 @@ const toAction = (thunk) => {
       if (e !== token) throw e;
       const { pos } = ctx;
 
-      return chain((value) => {
+      return new Chain((value) => {
         trace.length = pos;
         /* recording the resolved value */
         trace[pos] = value;
         ctx.pos = pos + 1;
         /** replay */
         return step(value);
-      })(ctx.effect);
+      }, ctx.effect);
     } finally {
       context = savedContext;
     }
   }
 };
-
 /** marks effectful expression */
 const perform = (monad) => {
   /* if the execution is in a replay stage the value will be cached */
@@ -366,7 +362,7 @@ const effect = (key) => (...values) => {
 
 const toModernHandler = (oldHandler) => (program) =>
   perform(oldHandler(toAction(program)));
-
+const singleCallback = (callback) => perform(_singleCallback(callback));
 const resume = (continuation, value) => perform(_resume(continuation, value));
 const handler = (handlers) => (program) => {
   for (const handler in handlers) {
@@ -381,21 +377,24 @@ const use = effect("use");
 const withUse = handler({
   use: (handler, k) => {
     return handler(() => resume(k));
-  },
+  }
 });
 const run = (thunk) => _run(toAction(() => withUse(thunk)));
 const io = (ioThunk) => perform(_io(ioThunk));
 const waitFor = (ioPromise) => perform(_waitFor(ioPromise));
 const forEach = (arr) => perform(_forEach(arr));
 const withForEach = toModernHandler(_withForEach);
+const withIo = toModernHandler(_withIo);
 const raise = (err) => perform(_raise(err));
 const print = effect("print");
-
+const handleError = (handler) => toModernHandler(_handleError(handler));
+const toEither = toModernHandler(_toEither);
+const withIoPromise = toModernHandler(_withIoPromise);
 const withPrint = handler({
   print(val, k) {
     io(() => console.log(val));
     return resume(k);
-  },
+  }
 });
 
 const main = () => {
@@ -410,17 +409,36 @@ const main = () => {
   return i * num;
 };
 
-run(main).then(console.log).catch(console.error);
+// run(main).then(console.log).catch(console.error);
+
+const getUser = effect("getUser");
+
+const handleGetUser = handler({
+  getUser: (id) => {
+    const res = resume({
+      id,
+      name: "Jason"
+    });
+    const res1 = resume({
+      id,
+      name: "Rully"
+    });
+    return [res, res1];
+  }
+});
+
+const program = () => {
+  // const user = getUser(10);
+  return {};
+};
+
+// run(() => ({})).then(console.log);
 
 module.exports = {
-  flow,
-  pipe,
-  id,
-  withForEach: _withForEach,
-  eff,
-  forEach: _forEach,
-  run: _run,
-  io: _io,
+  withForEach,
+  forEach,
+  run,
+  io,
   withIo,
   Interpreter,
   singleCallback,
@@ -431,10 +449,12 @@ module.exports = {
   resume,
   perform,
   effect,
-  Effect,
   toEither,
-  waitFor: _waitFor,
+  waitFor,
   withIoPromise,
-  raise: _raise,
+  raise,
   handleError,
+  toAction,
+  context,
+  token
 };
