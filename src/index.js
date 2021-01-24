@@ -2,7 +2,7 @@ const c = function (chainer) {
   return new Chain(chainer, this);
 };
 const m = function (mapper) {
-  return new Chain((e) => pure(mapper(e)), this);
+  return new Chain((e) => _pure(mapper(e)), this);
 };
 class Of {
   constructor(value) {
@@ -52,16 +52,16 @@ class SingleCallback {
 SingleCallback.prototype.chain = c;
 SingleCallback.prototype.map = m;
 
-const pure = (value) => new Of(value);
+const _pure = (value) => new Of(value);
 
-const chain = (chainer) => (action) => new Chain(chainer, action);
+const _chain = (chainer) => (action) => new Chain(chainer, action);
 
-const map = (mapper) => (action) =>
-  new Chain((val) => pure(mapper(val)), action);
+const _map = (mapper) => (action) =>
+  new Chain((val) => _pure(mapper(val)), action);
 
 const _effect = (key) => (...args) => new Perform(key, args);
 
-const options = (options) => (perform) => (
+const _options = (options) => (perform) => (
   (perform.options = options), perform
 );
 
@@ -146,7 +146,7 @@ class Interpreter {
             prev: lastPrev,
             action: handlers.return
               ? program.chain(handlers.return)
-              : program.chain(pure)
+              : program.chain(_pure)
           };
           context.transformCtx = context.prev;
           this.context = transformCtx;
@@ -223,23 +223,23 @@ class Interpreter {
     }
   }
 }
-const _io = effect("io");
-const _withIo = handler({
-  return: (value) => pure(() => value),
-  io: (thunk, k) => resume(k, thunk())
+const _io = _effect("io");
+const _withIo = _handler({
+  return: (value) => _pure(() => value),
+  io: (thunk, k) => _resume(k, thunk())
 });
 
-const _forEach = effect("forEach");
+const _forEach = _effect("forEach");
 
-const _withForEach = handler({
-  return: (val) => pure([val]),
+const _withForEach = _handler({
+  return: (val) => _pure([val]),
   forEach: (array, k) => {
     const nextInstr = (newArr = []) => {
       if (array.length === 0) {
-        return pure(newArr);
+        return _pure(newArr);
       } else {
         const first = array.shift();
-        return resume(k, first).chain((a) => {
+        return _resume(k, first).chain((a) => {
           for (const item of a) {
             newArr.push(item);
           }
@@ -251,30 +251,32 @@ const _withForEach = handler({
   }
 });
 
-const _raise = effect("error");
+const _raise = _effect("error");
+
 const _handleError = (handleError) =>
-  handler({
+  _handler({
     error: (exn, k) => handleError(k, exn)
   });
-const _toEither = handler({
+
+const _toEither = _handler({
   return: (value) =>
-    pure({
+    _pure({
       type: "right",
       value
     }),
   error: (exn) =>
-    pure({
+    _pure({
       type: "left",
       value: exn
     })
 });
-const _waitFor = effect("async");
+const _waitFor = _effect("async");
 
-const _withIoPromise = handler({
-  return: (value) => pure(Promise.resolve(value)),
+const _withIoPromise = _handler({
+  return: (value) => _pure(Promise.resolve(value)),
   async: (iopromise, k) =>
-    io(iopromise).chain((promise) =>
-      singleCallback((done) => {
+    _io(iopromise).chain((promise) =>
+      _singleCallback((done) => {
         promise
           .then((value) => {
             done({ success: true, value });
@@ -284,10 +286,10 @@ const _withIoPromise = handler({
           });
       }).chain((res) =>
         res.success
-          ? resume(k, res.value)
-          : options({
+          ? _resume(k, res.value)
+          : _options({
               scope: k
-            })(raise(res.value)).chain((e) => resume(k, e))
+            })(_raise(res.value)).chain((e) => _resume(k, e))
       )
     )
 });
@@ -305,7 +307,7 @@ const _run = (program) =>
       reject,
       {
         prev: undefined,
-        action: withIo(toEither(withIoPromise(program)))
+        action: _withIo(_toEither(_withIoPromise(program)))
       }
     ).run();
   });
@@ -318,22 +320,20 @@ let context;
 
 /** Runs `thunk()` as an effectful expression with `of` and `chain` as Monad's definition */
 const toAction = (thunk) => {
-  /** here it caches effects requests */
+  console.log(thunk);
   const trace = [];
   const ctx = { trace };
-  const res = step();
-  return res;
+  return step();
   function step() {
     const savedContext = context;
     ctx.pos = 0;
     try {
       context = ctx;
-      return pure(thunk());
+      return _pure(thunk());
     } catch (e) {
       /** re-throwing other exceptions */
       if (e !== token) throw e;
       const { pos } = ctx;
-
       return new Chain((value) => {
         trace.length = pos;
         /* recording the resolved value */
@@ -364,14 +364,14 @@ const toModernHandler = (oldHandler) => (program) =>
   perform(oldHandler(toAction(program)));
 const singleCallback = (callback) => perform(_singleCallback(callback));
 const resume = (continuation, value) => perform(_resume(continuation, value));
-const handler = (handlers) => (program) => {
+const handler = (handlers) => (thunk) => {
   for (const handler in handlers) {
     const saved = handlers[handler];
     handlers[handler] = (...args) => {
       return toAction(() => saved(...args));
     };
   }
-  return perform(_handler(handlers)(toAction(program)));
+  return perform(_handler(handlers)(toAction(thunk)));
 };
 const use = effect("use");
 const withUse = handler({
@@ -414,12 +414,12 @@ const main = () => {
 const getUser = effect("getUser");
 
 const handleGetUser = handler({
-  getUser: (id) => {
-    const res = resume({
+  getUser: (id, k) => {
+    const res = resume(k, {
       id,
       name: "Jason"
     });
-    const res1 = resume({
+    const res1 = resume(k, {
       id,
       name: "Rully"
     });
@@ -428,11 +428,13 @@ const handleGetUser = handler({
 });
 
 const program = () => {
-  // const user = getUser(10);
-  return {};
+  use(handleGetUser);
+  const user = getUser(10);
+  console.log("user", user);
+  return user;
 };
 
-// run(() => ({})).then(console.log);
+run(program).then(console.log);
 
 module.exports = {
   withForEach,
@@ -442,9 +444,9 @@ module.exports = {
   withIo,
   Interpreter,
   singleCallback,
-  chain,
-  pure,
-  map,
+  chain: _chain,
+  pure: _pure,
+  map: _map,
   handler,
   resume,
   perform,
